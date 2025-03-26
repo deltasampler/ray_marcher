@@ -1,11 +1,10 @@
-import {create_canvas} from "@engine/canvas.ts";
 import {gl_init, gl_link_program} from "@engine/gl.ts";
 import {cam3_compute_proj, cam3_compute_view, cam3_move_forward, cam3_move_right, cam3_new, cam3_pan, cam3_tilt, cam3_fru} from "@cl/cam3.ts";
 import {io_init, io_kb_key_down, io_key_down, io_m_move, kb_event_t, m_event_t} from "@engine/io.ts";
 import {vec2} from "@cl/vec2.ts";
 import {rgb, vec3, vec3_copy} from "@cl/vec3";
 import {PRESETS} from "./presets.ts";
-import {COLOR_MODE, UT, gs_object, gui_bool, gui_button, gui_canvas, gui_collapsing_header, gui_color_edit, gui_input_number, gui_input_vec, gui_reload_component, gui_render, gui_select, gui_slider_number, gui_window, gui_window_grid, gui_window_layout, unit} from "@gui/gui.ts";
+import {COLOR_MODE, UT, gs_object, gui_bool, gui_button, gui_canvas, gui_collapsing_header, gui_color_edit, gui_input_number, gui_input_vec, gui_reload_component, gui_render, gui_select, gui_slider_number, gui_text, gui_update, gui_window, gui_window_grid, gui_window_layout, unit} from "@gui/gui.ts";
 
 const root = gui_window(null);
 gui_window_grid(
@@ -78,7 +77,7 @@ const texture_program = gl_link_program({
         uniform vec2 u_viewport;
         uniform mat4 u_projection;
         uniform mat4 u_view;
-        uniform float u_limit;
+        uniform float u_march_limit;
         uniform float u_shadow_limit;
         uniform float u_near;
         uniform float u_far;
@@ -93,6 +92,7 @@ const texture_program = gl_link_program({
         uniform float u_time;
         uniform float u_ambient_stren;
         uniform float u_specular_stren;
+        uniform float u_sun_size;
         uniform int u_aa_samples;
         uniform int u_fract_iter;
 
@@ -297,10 +297,10 @@ const texture_program = gl_link_program({
             }
         }
 
-        float march_shadow(vec3 pos, vec3 ray_dir, float limit, float near, float far) {
+        float march_shadow(vec3 pos, vec3 ray_dir, float march_limit, float near, float far) {
             float dist_sum = near;
 
-             for (float i = 0.0; i < limit && dist_sum < far; i += 1.0) {
+             for (float i = 0.0; i < march_limit && dist_sum < far; i += 1.0) {
                 float dist = map(pos + ray_dir * dist_sum).d;
 
                 if (dist < near) {
@@ -333,8 +333,15 @@ const texture_program = gl_link_program({
             ) / 4.0;
         }
 
-        vec3 render_skybox(vec3 ray_dir, vec3 light_dir) {
+        vec3 render_skybox(vec3 ray_dir, vec3 light_dir, int sign) {
             vec3 col = mix(u_sky_low_color, u_sky_high_color, ray_dir.y);
+            float sun_size = u_sun_size / 100.0;
+
+            if (sign == 1) {
+                float sun_spec = dot(ray_dir, light_dir) - 1.0 + sun_size;
+                sun_spec = min(exp(sun_spec * SUN_SHARPNESS / sun_size), 1.0);
+                col += u_light_color * sun_spec;
+            }
 
             return col;
         }
@@ -346,7 +353,7 @@ const texture_program = gl_link_program({
 
             res_t res;
 
-            march(mar, res, u_limit, u_near, u_far);
+            march(mar, res, u_march_limit, u_near, u_far);
 
             vec3 col = vec3(0.0);
             vec3 light_dir = normalize(u_light_dir);
@@ -354,13 +361,7 @@ const texture_program = gl_link_program({
             vec3 refl_dir = reflect(mar.ray_dir, norm);
 
             // background
-            vec3 bg_color = render_skybox(mar.ray_dir, light_dir);
-
-            if (mar.sign == 1) {
-                float sun_spec = dot(mar.ray_dir, light_dir) - 1.0 + SUN_SIZE;
-                sun_spec = min(exp(sun_spec * SUN_SHARPNESS / SUN_SIZE), 1.0);
-                col.xyz += u_light_color * sun_spec;
-            }
+            vec3 bg_color = render_skybox(mar.ray_dir, light_dir, mar.sign);
 
             if (mar.sign == 0) {
                 float depth = mar.dist_sum / u_far;
@@ -377,7 +378,7 @@ const texture_program = gl_link_program({
                 res_col = clamp(smooth_color(mar.pos, s0, s1, u_near * 0.5), 0.0, 1.0);
 
                 // ambient
-                vec3 ambient = u_light_color * u_ambient_stren * 0.5 + bg_color * u_ambient_stren * 0.5;
+                vec3 ambient = u_light_color * bg_color * u_ambient_stren;
 
                 // diffuse
                 float diffuse_factor = clamp(dot(norm, light_dir), 0.0, 1.0);
@@ -438,7 +439,7 @@ const texture_program = gl_link_program({
 const u_viewport = gl.getUniformLocation(texture_program, "u_viewport");
 const u_projection = gl.getUniformLocation(texture_program, "u_projection");
 const u_view = gl.getUniformLocation(texture_program, "u_view");
-const u_limit = gl.getUniformLocation(texture_program, "u_limit");
+const u_march_limit = gl.getUniformLocation(texture_program, "u_march_limit");
 const u_shadow_limit = gl.getUniformLocation(texture_program, "u_shadow_limit");
 const u_near = gl.getUniformLocation(texture_program, "u_near");
 const u_far = gl.getUniformLocation(texture_program, "u_far");
@@ -455,27 +456,31 @@ const u_ambient_stren = gl.getUniformLocation(texture_program, "u_ambient_stren"
 const u_specular_stren = gl.getUniformLocation(texture_program, "u_specular_stren");
 const u_aa_samples = gl.getUniformLocation(texture_program, "u_aa_samples");
 const u_fract_iter = gl.getUniformLocation(texture_program, "u_fract_iter");
+const u_sun_size = gl.getUniformLocation(texture_program, "u_sun_size");
 
 const config = {
     preset: 25,
-    divider: 2.0,
-    limit: 512,
+    screenshot_res: vec2(3840, 2160),
+
+    is_rendering: true,
+    divider: 4.0,
+    aa_samples: 1,
+    march_limit: 512,
     shadow_limit: 64,
-    near: 0.00001,
-    far: 32.0,
+
     light_dir: vec3(1.0, 1.0, 1.0),
     light_color: rgb(255, 252, 207),
     sky_low_color: rgb(156, 179, 229),
     sky_high_color: rgb(69, 102, 190),
-    fract_scaling: 1.0,
-    fract_rotation: vec3(0.0, 0.0, 0.0),
-    fract_translation: vec3(0.0, 0.0, 0.0),
-    fract_color: rgb(255, 255, 255),
     ambient_stren: 0.1,
     specular_stren: 0.3,
-    is_rendering: true,
-    aa_samples: 1,
-    fract_iter: 16
+    sun_size: 0.1,
+
+    fract_iter: 16,
+    fract_translation: vec3(0.0, 0.0, 0.0),
+    fract_rotation: vec3(0.0, 0.0, 0.0),
+    fract_scaling: 1.0,
+    fract_color: rgb(255, 255, 255)
 };
 
 let texture_width = Math.floor(canvas_el.width / config.divider);
@@ -495,6 +500,8 @@ gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex
 
 const camera = cam3_new();
 camera.movement_speed = 0.01;
+camera.near = 0.00001,
+camera.far = 32.0,
 camera.position[1] = 15.0;
 
 function load_preset(index: number): void {
@@ -550,6 +557,70 @@ function update(): void {
     cam3_compute_view(camera);
 }
 
+function reload_texture() {
+    texture_width = canvas_el.width / config.divider;
+    texture_height = canvas_el.height / config.divider;
+
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, texture_width, texture_height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+}
+
+function make_screenshot() {
+    is_taking_screen = true;
+    config.shadow_limit = 1024;
+    config.aa_samples = 4;
+    config.march_limit = 1024;
+
+    let width = config.screenshot_res[0], height = config.screenshot_res[1];
+
+    const texture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    
+    const fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+    cam3_compute_proj(camera, width, height);
+    render_texture(fbo, texture, width, height);
+
+    const pixels = new Uint8Array(width * height * 4);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d")!;
+
+    canvas.width = width;
+    canvas.height = height;
+
+    const imageData = new ImageData(new Uint8ClampedArray(pixels), width, height);
+    ctx.putImageData(imageData, 0, 0);
+    ctx.scale(1, -1);
+    ctx.drawImage(canvas, 0, -canvas.height);
+
+    const link = document.createElement("a");
+    link.download = "image.png";
+    link.href = canvas.toDataURL("image/png");
+    link.click();
+
+    config.shadow_limit = 64;
+    config.aa_samples = 1;
+    config.march_limit = 512;
+    is_taking_screen = false;
+}
+
 function render_texture(fbo: WebGLFramebuffer, texture: WebGLTexture, width: number, height: number) {
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
     gl.viewport(0, 0, width, height);
@@ -560,10 +631,10 @@ function render_texture(fbo: WebGLFramebuffer, texture: WebGLTexture, width: num
     gl.uniform2fv(u_viewport, vec2(width, height));
     gl.uniformMatrix4fv(u_projection, false, camera.projection);
     gl.uniformMatrix4fv(u_view, false, camera.view);
-    gl.uniform1f(u_limit, config.limit);
+    gl.uniform1f(u_march_limit, config.march_limit);
     gl.uniform1f(u_shadow_limit, config.shadow_limit);
-    gl.uniform1f(u_near, config.near);
-    gl.uniform1f(u_far, config.far);
+    gl.uniform1f(u_near, camera.near);
+    gl.uniform1f(u_far, camera.far);
     gl.uniform3fv(u_light_dir, config.light_dir);
     gl.uniform3fv(u_light_color, config.light_color);
     gl.uniform3fv(u_sky_low_color, config.sky_low_color);
@@ -575,6 +646,7 @@ function render_texture(fbo: WebGLFramebuffer, texture: WebGLTexture, width: num
     gl.uniform1f(u_time, performance.now() / 1000.0);
     gl.uniform1f(u_ambient_stren, config.ambient_stren);
     gl.uniform1f(u_specular_stren, config.specular_stren);
+    gl.uniform1f(u_sun_size, config.sun_size);
     gl.uniform1i(u_aa_samples, config.aa_samples);
     gl.uniform1i(u_fract_iter, config.fract_iter);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -593,9 +665,13 @@ function render(): void {
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 }
 
+let is_taking_screen = false;
+
 function loop(): void {
-    update();
-    render();
+    if (!is_taking_screen) {
+        update();
+        render();
+    }
 
     requestAnimationFrame(loop);
 }
@@ -605,91 +681,50 @@ loop();
 const preset_keys = Object.keys(PRESETS);
 const preset_values = Object.keys(PRESETS).map(i => parseInt(i));
 
-const settings_ch = gui_collapsing_header(left, "Settings");
-gui_select(settings_ch, "Preset", gs_object(config, "preset"), preset_keys, preset_values, function() {
+const general_ch = gui_collapsing_header(left, "Settings");
+gui_text(general_ch, `
+<pre>
+Info:
+Press backtick '\`' to enter/exit camera
+</pre>
+`);
+gui_select(general_ch, "Preset", gs_object(config, "preset"), preset_keys, preset_values, function() {
     load_preset(config.preset);
+    gui_update(left);
 });
-gui_bool(settings_ch, "Is Rendering", gs_object(config, "is_rendering"));
-gui_slider_number(settings_ch, "Divider", gs_object(config, "divider"), 1, 1, 16);
-gui_slider_number(settings_ch, "AA Samples", gs_object(config, "aa_samples"), 1, 1, 4);
-gui_slider_number(settings_ch, "Limit", gs_object(config, "limit"), 1, 1, 1024);
-gui_slider_number(settings_ch, "Shadow Limit", gs_object(config, "shadow_limit"), 1, 1, 1024);
-gui_input_number(settings_ch, "Near", gs_object(config, "near"), 0.00001, 0.00001, 1024.0);
-gui_input_number(settings_ch, "Far", gs_object(config, "far"), 0.00001, 0.00001, 1024.0);
-gui_input_vec(settings_ch, "Light Direction", config.light_dir, 0.01, -1.0, 1.0, 3);
-gui_color_edit(settings_ch, "Light Color", COLOR_MODE.R_0_1, config.light_color);
-gui_color_edit(settings_ch, "Sky Low Color", COLOR_MODE.R_0_1, config.sky_low_color);
-gui_color_edit(settings_ch, "Sky High Color", COLOR_MODE.R_0_1, config.sky_high_color);
-gui_slider_number(settings_ch, "Ambient Strength", gs_object(config, "ambient_stren"), 0.01, 0.0, 1.0);
-gui_slider_number(settings_ch, "Specular Strength", gs_object(config, "specular_stren"), 0.01, 0.0, 1.0);
-gui_input_number(settings_ch, "Fractal Scaling", gs_object(config, "fract_scaling"), 0.01, -100.0, 100.0);
-gui_input_vec(settings_ch, "Fractal Rotation", config.fract_rotation, 0.01, -180.0, 180.0, 3);
-gui_input_vec(settings_ch, "Fractal Translation", config.fract_translation, 0.01, -100.0, 100.0, 3);
-gui_color_edit(settings_ch, "Fractal Color", COLOR_MODE.R_0_1, config.fract_color);
-gui_slider_number(settings_ch, "Fractal Iterations", gs_object(config, "fract_iter"), 1, 1, 16);
-
-gui_button(settings_ch, "Reload", function() {
-    texture_width = canvas_el.width / config.divider;
-    texture_height = canvas_el.height / config.divider;
-
-    gl.bindTexture(gl.TEXTURE_2D, texture);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, texture_width, texture_height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+gui_bool(general_ch, "Is Rendering", gs_object(config, "is_rendering"));
+gui_slider_number(general_ch, "Qaulity Divider", gs_object(config, "divider"), 1, 1, 16, function() {
+    reload_texture();
 });
-gui_button(settings_ch, "Export", () => {
-    setTimeout(() => {
-        config.is_rendering = false;
-        config.shadow_limit = 1024;
-        config.aa_samples = 4;
-        config.limit = 1024;
+gui_slider_number(general_ch, "AA Samples", gs_object(config, "aa_samples"), 1, 1, 4);
+gui_slider_number(general_ch, "March Limit", gs_object(config, "march_limit"), 1, 1, 1024);
+gui_input_vec(general_ch, "Screenshot Resolution", config.screenshot_res, 1, 1, 8192, 2);
+gui_button(general_ch, "Make Screenshot", make_screenshot);
 
-        let width = 3840, height = 2160;
+const camera_ch = gui_collapsing_header(left, "Canera");
+gui_input_number(camera_ch, "Near", gs_object(camera, "near"), 0.00001, 0.00001, 1024.0);
+gui_input_number(camera_ch, "Far", gs_object(camera, "far"), 0.00001, 0.00001, 1024.0);
+gui_slider_number(camera_ch, "FOV", gs_object(camera, "fov"), 0.1, 0.0, 180.0);
+gui_input_vec(camera_ch, "Position", camera.position, 0.001, -1000.0, 1000.0, 3);
+gui_slider_number(camera_ch, "Speed", gs_object(camera, "movement_speed"), 0.001, 0.0, 1.0);
 
-        const texture = gl.createTexture();
-        gl.bindTexture(gl.TEXTURE_2D, texture);
-        gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-        
-        const fbo = gl.createFramebuffer();
-        gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
-        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+const lighting_ch = gui_collapsing_header(left, "Lighting");
+gui_input_vec(lighting_ch, "Light Direction", config.light_dir, 0.01, -1.0, 1.0, 3);
+gui_color_edit(lighting_ch, "Light Color", COLOR_MODE.R_0_1, config.light_color);
+gui_slider_number(lighting_ch, "Ambient Strength", gs_object(config, "ambient_stren"), 0.01, 0.0, 1.0);
+gui_slider_number(lighting_ch, "Specular Strength", gs_object(config, "specular_stren"), 0.01, 0.0, 1.0);
+gui_slider_number(lighting_ch, "Shadow march_limit", gs_object(config, "shadow_limit"), 1, 1, 1024);
 
-        render_texture(fbo, texture, width, height);
+const skybox_ch = gui_collapsing_header(left, "Skybox");
+gui_color_edit(skybox_ch, "Sky Low Color", COLOR_MODE.R_0_1, config.sky_low_color);
+gui_color_edit(skybox_ch, "Sky High Color", COLOR_MODE.R_0_1, config.sky_high_color);
+gui_slider_number(skybox_ch, "Sun Size", gs_object(config, "sun_size"), 0.001, 0.0, 1.0);
 
-        const pixels = new Uint8Array(width * height * 4);
-
-        gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-        gl.bindTexture(gl.TEXTURE_2D, texture);
-        gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
-        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-
-        const canvas = document.createElement("canvas");
-        const ctx = canvas.getContext("2d")!;
-
-        canvas.width = width;
-        canvas.height = height;
-
-        const imageData = new ImageData(new Uint8ClampedArray(pixels), width, height);
-        ctx.putImageData(imageData, 0, 0);
-        ctx.scale(1, -1);
-        ctx.drawImage(canvas, 0, -canvas.height);
-
-        const link = document.createElement("a");
-        link.download = "image.png";
-        link.href = canvas.toDataURL("image/png");
-        link.click();
-
-        config.shadow_limit = 64;
-        config.aa_samples = 1;
-        config.is_rendering = true;
-        config.limit = 512;
-    }, 1000);
-});
+const fractal_ch = gui_collapsing_header(left, "Fractal");
+gui_input_number(fractal_ch, "Fractal Scaling", gs_object(config, "fract_scaling"), 0.01, -100.0, 100.0);
+gui_input_vec(fractal_ch, "Fractal Rotation", config.fract_rotation, 0.01, -180.0, 180.0, 3);
+gui_input_vec(fractal_ch, "Fractal Translation", config.fract_translation, 0.01, -100.0, 100.0, 3);
+gui_color_edit(fractal_ch, "Fractal Color", COLOR_MODE.R_0_1, config.fract_color);
+gui_slider_number(fractal_ch, "Fractal Iterations", gs_object(config, "fract_iter"), 1, 1, 16);
 
 gui_reload_component(left);
