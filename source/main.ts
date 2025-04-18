@@ -1,8 +1,8 @@
 import {gl_init, gl_link_program} from "@engine/gl.ts";
-import {cam3_compute_proj, cam3_compute_view, cam3_move_forward, cam3_move_right, cam3_new, cam3_pan, cam3_tilt, cam3_fru} from "@cl/cam3.ts";
+import {cam3_compute_proj, cam3_compute_view, cam3_move_forward, cam3_move_right, cam3_new, cam3_pan, cam3_tilt, cam3_fru} from "@cl/camera/cam3.ts";
 import {io_init, io_kb_key_down, io_key_down, io_m_move, kb_event_t, m_event_t} from "@engine/io.ts";
-import {vec2} from "@cl/vec2.ts";
-import {rgb, vec3, vec3_copy} from "@cl/vec3";
+import {vec2} from "@cl/math/vec2.ts";
+import {rgb, vec3, vec3_copy} from "@cl/math/vec3";
 import {PRESETS} from "./presets.ts";
 import {COLOR_MODE, UT, gs_object, gui_bool, gui_button, gui_canvas, gui_collapsing_header, gui_color_edit, gui_input_number, gui_input_vec, gui_reload_component, gui_render, gui_select, gui_slider_number, gui_text, gui_update, gui_window, gui_window_grid, gui_window_layout, unit} from "@gui/gui.ts";
 

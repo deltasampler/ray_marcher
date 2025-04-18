@@ -1,5 +1,4 @@
-import {vec3_t} from "@cl/type.ts";
-import {vec3} from "@cl/vec3.ts";
+import {vec3, vec3_t} from "@cl/math/vec3.ts";
 
 export type preset_t = {
     fract_scaling: number;
